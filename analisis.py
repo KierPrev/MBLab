@@ -132,7 +132,7 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
 
     def y_plot_from(d):
         y = d["y"]
-        return (y - d["y0"]) if (state["centrar0"] and np.isfinite(d["y0"])) else y
+        return (y - d["y0"] + 400) if (state["centrar0"] and np.isfinite(d["y0"])) else y
 
     def dibujar_fill(ax, d, yplot):
         if d["err"] is None:
@@ -141,7 +141,7 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
                                alpha=0.18, linewidth=0, color=d["color"], label="_nolegend_")
 
     def actualizar_ylabel():
-        ax_curv.set_ylabel("ΔCO₂ [ppm]" if state["centrar0"] else "CO₂ [ppm]")
+        ax_curv.set_ylabel("CO₂ [ppm] (ajustado)" if state["centrar0"] else "CO₂ [ppm]")
 
     # Función eliminada: extraer_valores_en_ventana
 
@@ -171,8 +171,9 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
             datasets.append({"x":x,"y":y,"y0":y0,"label":label,"line":ln,"err":err,"fill":fill,"color":color})
             rutas_agregadas.append(str(p)); nuevos_ok += 1
 
-        if datasets and nuevos_ok:
-            ax_curv.legend(loc="best", frameon=True, framealpha=0.95)
+        # Remove legend
+        # if datasets and nuevos_ok:
+        #     ax_curv.legend(loc="best", frameon=True, framealpha=0.95)
         actualizar_ylabel()
         ax_curv.relim(); ax_curv.autoscale()
         fig.canvas.draw_idle()
@@ -257,6 +258,43 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
             checks.set_active(0)  # toggle centrado
         elif key == "q":
             plt.close(fig)
+
+    # Hover functionality
+    annot = ax_curv.annotate("", xy=(0,0), xytext=(10,10), textcoords="offset points",
+                             bbox=dict(boxstyle="round", fc="w"), fontsize=9)
+    annot.set_visible(False)
+
+    def update_annot(line, ind):
+        x, y = line.get_xdata()[ind["ind"][0]], line.get_ydata()[ind["ind"][0]]
+        annot.xy = (x, y)
+        # Find the dataset label and color
+        for d in datasets:
+            if d["line"] is line:
+                text = d["label"]
+                color = d["color"]
+                break
+        else:
+            text = "Unknown"
+            color = "black"
+        annot.set_text(text)
+        annot.get_bbox_patch().set_facecolor(color)
+        annot.get_bbox_patch().set_alpha(0.8)
+
+    def hover(event):
+        vis = annot.get_visible()
+        if event.inaxes == ax_curv:
+            for d in datasets:
+                cont, ind = d["line"].contains(event)
+                if cont:
+                    update_annot(d["line"], ind)
+                    annot.set_visible(True)
+                    fig.canvas.draw_idle()
+                    return
+        if vis:
+            annot.set_visible(False)
+            fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("motion_notify_event", hover)
 
     fig.canvas.mpl_connect("key_press_event", on_key)
     plt.show()

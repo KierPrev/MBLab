@@ -25,7 +25,7 @@ except Exception:
 
 # ==== CONFIG ====
 BAUD = 115200
-HEADER = "Time[s] CO2_smooth[ppm] dCO2_dt[ppm/s] d2CO2_dt2[ppm/s^2]"
+HEADER = "Time[s] CO2_smooth[ppm] dCO2_dt[ppm/s] d2CO2_dt2[ppm/s^2] stim_f[Hz]"
 PPM_MIN, PPM_MAX = 250, 200000   # permitir valores “ajustados” >100k
 # =================
 
@@ -310,13 +310,14 @@ class CO2GUI(tk.Tk):
         self.connected = False
         self.use_phantom = tk.BooleanVar(value=False)
         self.autoscroll_var = tk.BooleanVar(value=True)
+        self.current_stim_f = 0.0  # frecuencia actual de estimulación
 
         self.serman = SerialManager(self._on_serial_line)
         self.phantom = PhantomSensor(self._on_serial_line)
 
         self.acquiring = False
         self.out_path = None
-        self.t_vals, self.ppm_vals = [], []
+        self.t_vals, self.ppm_vals, self.stim_f_vals = [], [], []
         self.msg_queue = queue.Queue()
         self.data_queue = queue.Queue()
 
@@ -348,6 +349,9 @@ class CO2GUI(tk.Tk):
         self.bo_maximize    = tk.BooleanVar(value=True)   # True: aumentar tasa; False: disminuir
         self.bo_jitter_var  = tk.StringVar(value="0.03")  # exploración multiplicativa
         self.bo_seed_var    = tk.StringVar(value="123")
+
+        # Nuevo: variable para retraso de estimulación
+        self.stim_delay_var = tk.StringVar(value="0")
 
         self._build_ui()
         self._refresh_ports()
@@ -497,10 +501,12 @@ class CO2GUI(tk.Tk):
         ttk.Entry(stim_lbl, textvariable=self.delta_var, width=10).grid(row=0, column=3, sticky="w", padx=4, pady=4)
         ttk.Label(stim_lbl, text="D (s):").grid(row=0, column=4, sticky="e", padx=4, pady=4)
         ttk.Entry(stim_lbl, textvariable=self.d_var, width=10).grid(row=0, column=5, sticky="w", padx=4, pady=4)
+        ttk.Label(stim_lbl, text="Retraso (s):").grid(row=0, column=6, sticky="e", padx=4, pady=4)
+        ttk.Entry(stim_lbl, textvariable=self.stim_delay_var, width=8).grid(row=0, column=7, sticky="w", padx=4, pady=4)
         self.stim_start_btn = ttk.Button(stim_lbl, text="Iniciar", command=self._stim_start, state="disabled")
-        self.stim_start_btn.grid(row=0, column=6, sticky="w", padx=6, pady=4)
+        self.stim_start_btn.grid(row=0, column=8, sticky="w", padx=6, pady=4)
         self.stim_stop_btn = ttk.Button(stim_lbl, text="Detener", command=self._stim_stop, state="disabled")
-        self.stim_stop_btn.grid(row=0, column=7, sticky="w", padx=6, pady=4)
+        self.stim_stop_btn.grid(row=0, column=9, sticky="w", padx=6, pady=4)
 
         ttk.Label(stim_lbl, text="fmin (Hz):").grid(row=1, column=0, sticky="e", padx=4, pady=4)
         ttk.Entry(stim_lbl, textvariable=self.fmin_var, width=10).grid(row=1, column=1, sticky="w", padx=4, pady=4)
@@ -668,14 +674,29 @@ class CO2GUI(tk.Tk):
             fi = float(self.fi_var.get().strip())
             dv = float(self.delta_var.get().strip())
             dsec = float(self.d_var.get().strip())
-            if fi <= 0 or dsec <= 0:
+            delay = float(self.stim_delay_var.get().strip())
+            if fi <= 0 or dsec <= 0 or delay < 0:
                 raise ValueError
         except:
-            return messagebox.showerror("Error", "Parámetros inválidos (Fi>0, D>0).")
-        self._send_cmd(f"S {fi} {dv} {dsec}", ">> Estimulación iniciar")
+            return messagebox.showerror("Error", "Parámetros inválidos (Fi>0, D>0, Retraso>=0).")
+
+        if delay == 0:
+            # Inicio inmediato
+            self._send_cmd(f"S {fi} {dv} {dsec}", ">> Estimulación iniciar")
+        else:
+            # Inicio con retraso: lanza hilo para monitorear
+            threading.Thread(target=self._delayed_stim_start, args=(fi, dv, dsec, delay), daemon=True).start()
 
     def _stim_stop(self):
         self._send_cmd("X", ">> Estimulación detener")
+
+    def _delayed_stim_start(self, fi, dv, dsec, delay):
+        """Hilo para iniciar estimulación con retraso."""
+        while self.acquiring and len(self.t_vals) > 0 and self.t_vals[-1] < delay:
+            time.sleep(0.1)  # Chequea cada 100ms
+        if self.acquiring and len(self.t_vals) > 0 and self.t_vals[-1] >= delay:
+            self._send_cmd(f"S {fi} {dv} {dsec}", f">> Estimulación iniciar (retraso {delay}s)")
+        # Si no se alcanzó, el hilo termina silenciosamente
 
     def _build_metadata_header(self):
         """Metadatos para registrar en el archivo de salida (líneas comentadas)."""
@@ -690,7 +711,7 @@ class CO2GUI(tk.Tk):
         if method.startswith("Savitzky"):
             lines.append(f"# Savitzky–Golay order: {order_txt}")
         lines.append(f"# Columns: {HEADER}")
-        lines.append(f"# Units: Time[s], CO2[ppm], dCO2/dt[ppm/s], d2CO2/dt2[ppm/s^2]")
+        lines.append(f"# Units: Time[s], CO2[ppm], dCO2/dt[ppm/s], d2CO2/dt2[ppm/s^2], stim_f[Hz]")
         return "\n".join(lines) + "\n"
 
     # ---------- Adquisición ----------
@@ -716,7 +737,7 @@ class CO2GUI(tk.Tk):
             return messagebox.showerror("Error", "Duración inválida (>0).")
 
         # Reset buffers y gráficos
-        self.t_vals.clear(); self.ppm_vals.clear()
+        self.t_vals.clear(); self.ppm_vals.clear(); self.stim_f_vals.clear()
         self.prev_ppm_for_rule = None
         self.line0.set_data([], [])
         self.line1.set_data([], [])
@@ -774,6 +795,7 @@ class CO2GUI(tk.Tk):
         if line.startswith("#STIM_F="):
             try:
                 val = line.split("=", 1)[1].strip()
+                self.current_stim_f = float(val)
                 self.current_freq_var.set(val + " Hz")
             except:
                 pass
@@ -800,6 +822,8 @@ class CO2GUI(tk.Tk):
                         self._stop_acq()
                 else:
                     self.msg_queue.put(f"{t:g} {ppm:g}")
+                # Siempre agregar stim_f al buffer, incluso si no se está adquiriendo
+                self.stim_f_vals.append(self.current_stim_f)
                 return
             except:
                 pass
@@ -829,7 +853,7 @@ class CO2GUI(tk.Tk):
             pass
 
         # Guardado con suavizado + derivadas
-        if to_write and self.acquiring and self.out_path:
+        if to_write and self.out_path:
             try:
                 t_arr = np.array(self.t_vals, dtype=float)
                 y_arr = np.array(self.ppm_vals, dtype=float)
@@ -849,7 +873,7 @@ class CO2GUI(tk.Tk):
                 with open(self.out_path, "a", encoding="utf-8") as f:
                     for k in range(len(to_write)):
                         idx = start_idx + k
-                        f.write(f"{t_arr[idx]:g} {y_s[idx]:g} {d1[idx]:g} {d2[idx]:g}\n")
+                        f.write(f"{t_arr[idx]:g} {y_s[idx]:g} {d1[idx]:g} {d2[idx]:g} {self.stim_f_vals[idx]:g}\n")
             except Exception as e:
                 self._append_log(f"[ERROR] guardando archivo: {e}")
 
@@ -968,7 +992,7 @@ class CO2GUI(tk.Tk):
         best_f, best_s = None, -1e9
 
         # Asegura buffers limpios al iniciar BO
-        self.t_vals.clear(); self.ppm_vals.clear()
+        self.t_vals.clear(); self.ppm_vals.clear(); self.stim_f_vals.clear()
         self.prev_ppm_for_rule = None
 
         # Arranca adquisición si no estaba

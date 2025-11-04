@@ -18,7 +18,7 @@ import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.widgets import CheckButtons, Button, RangeSlider
+from matplotlib.widgets import CheckButtons, Button
 
 # -------------------- UI adaptativa (HiDPI / 2K) --------------------
 def compute_ui_scale(user_scale: float | None, compact: bool) -> float:
@@ -112,8 +112,7 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
     # Márgenes y espacio inferior para controles
     plt.subplots_adjust(bottom=0.23 if not compact else 0.20)
 
-    ax_curv.set_title("CO₂ vs tiempo  •  A: agregar  |  S: guardar  |  Z: centrar 0  |  Q: salir")
-    ax_curv.set_xlabel("Tiempo [s]"); ax_curv.set_ylabel("CO₂ [ppm]")
+    ax_curv.set_xlabel("Tiempo [s]")
     ax_curv.grid(True, alpha=0.25)
 
     ax_box = None  # No hay boxplots
@@ -122,7 +121,7 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
     rutas_agregadas = []
     rng = np.random.default_rng()
 
-    state = {"centrar0": bool(iniciar_centrado)}
+    state = {"centrar0": bool(iniciar_centrado), "violin_mode": False}
 
     # ---- helpers ----
     def first_finite(a, default=np.nan):
@@ -140,8 +139,15 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
         return ax.fill_between(d["x"], yplot - d["err"], yplot + d["err"],
                                alpha=0.18, linewidth=0, color=d["color"], label="_nolegend_")
 
+    def actualizar_title():
+        mode = "Violín" if state["violin_mode"] else "Curvas"
+        ax_curv.set_title(f"CO₂ {mode} vs tiempo  •  A: agregar  |  S: guardar  |  Z: centrar 0  |  Q: salir")
+
     def actualizar_ylabel():
-        ax_curv.set_ylabel("CO₂ [ppm] (ajustado)" if state["centrar0"] else "CO₂ [ppm]")
+        if state["violin_mode"]:
+            ax_curv.set_ylabel("Distribución de CO₂ [ppm]" + (" (ajustado)" if state["centrar0"] else ""))
+        else:
+            ax_curv.set_ylabel("CO₂ [ppm]" + (" (ajustado)" if state["centrar0"] else ""))
 
     # Función eliminada: extraer_valores_en_ventana
 
@@ -175,6 +181,7 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
         # if datasets and nuevos_ok:
         #     ax_curv.legend(loc="best", frameon=True, framealpha=0.95)
         actualizar_ylabel()
+        actualizar_title()
         ax_curv.relim(); ax_curv.autoscale()
         fig.canvas.draw_idle()
 
@@ -183,25 +190,49 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
     # Boxplots eliminados
 
     def replot_curvas():
-        for d in datasets:
-            yplot = y_plot_from(d)
-            d["line"].set_ydata(yplot)
-            if d["fill"] is not None:
-                try: d["fill"].remove()
-                except Exception: pass
-            d["fill"] = dibujar_fill(ax_curv, d, yplot)
+        ax_curv.clear()
+        ax_curv.set_xlabel("Tiempo [s]")
+        ax_curv.grid(True, alpha=0.25)
+        actualizar_title()
         actualizar_ylabel()
+
+        if state["violin_mode"]:
+            # Violin plot mode
+            positions = []
+            data = []
+            labels = []
+            colors = []
+            for i, d in enumerate(datasets):
+                yplot = y_plot_from(d)
+                positions.append(i)
+                data.append(yplot)
+                labels.append(d["label"])
+                colors.append(d["color"])
+            ax_curv.violinplot(data, positions=positions, showmeans=True, showmedians=True)
+            ax_curv.set_xticks(positions)
+            ax_curv.set_xticklabels(labels, rotation=45, ha='right')
+        else:
+            # Curve mode
+            for d in datasets:
+                yplot = y_plot_from(d)
+                d["line"] = ax_curv.plot(d["x"], yplot, marker="o", color=d["color"], label=d["label"])[0]
+                if d["fill"] is not None:
+                    try: d["fill"].remove()
+                    except Exception: pass
+                d["fill"] = dibujar_fill(ax_curv, d, yplot)
+
         ax_curv.relim(); ax_curv.autoscale()
         fig.canvas.draw_idle()
 
     # ----- Carga inicial -----
     if rutas:
         agregar_curvas(rutas)
+    actualizar_title()
 
     # ----- Controles abajo -----
     ax_checks = fig.add_axes([0.10, 0.13, 0.80, 0.10 if not compact else 0.09])
-    check_labels = ["Centrar en 0"]
-    check_states = [state["centrar0"]]
+    check_labels = ["Centrar en 0", "Modo violín"]
+    check_states = [state["centrar0"], state["violin_mode"]]
     checks = CheckButtons(ax_checks, check_labels, check_states)
     for txt in checks.labels:
         txt.set_fontsize(max(8, 11*ui_scale))
@@ -209,6 +240,7 @@ def plotear_archivos(rutas, salida=None, iniciar_centrado=False,
     def on_check(label):
         status = checks.get_status()
         state["centrar0"] = bool(status[0])
+        state["violin_mode"] = bool(status[1])
         replot_curvas()
 
     checks.on_clicked(on_check)

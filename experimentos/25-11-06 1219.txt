@@ -1,0 +1,3 @@
+Time[s] CO2_smooth[ppm] dCO2_dt[ppm/s] d2CO2_dt2[ppm/s^2] stim_f[Hz]
+0 380 nan nan 0
+1 360 nan nan 0
